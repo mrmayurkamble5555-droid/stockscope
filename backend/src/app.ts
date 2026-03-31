@@ -10,6 +10,6 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Mount all routes from api.ts at root
-app.use("/", apiRouter);
+app.use("/api/v1", apiRouter);
 
 export default app;

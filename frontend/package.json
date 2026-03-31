@@ -7,8 +7,13 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
+    "chart.js": "^4.5.1",
+    "chartjs-chart-financial": "^0.2.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-native-gifted-charts": "^1.4.76",
+    "react-native-linear-gradient": "^2.8.3",
+    "react-native-svg": "^15.15.4",
     "react-scripts": "5.0.1",
     "web-vitals": "^2.1.4"
   },

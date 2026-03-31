@@ -160,9 +160,14 @@ export async function getFullStockData(ticker: string) {
       f.date AS fund_date,
       f.pe_ratio, f.industry_pe, f.roce_pct, f.debt_to_equity,
       f.net_profit_cr, f.free_cashflow_cr, f.profit_growth_5y,
-      f.pledged_pct, f.market_cap_cr, f.cmp, f.source AS fund_source,
+      f.pledged_pct, f.market_cap_cr,
+      COALESCE(NULLIF(f.cmp, 0), o.close) AS cmp,
+      f.source AS fund_source,
       t.date AS tech_date,
       t.pivot, t.r1, t.r2, t.s1, t.s2, t.ema20, t.ema50, t.ema100,
+      o.close AS ohlc_close, o.open AS ohlc_open,
+      o.high AS ohlc_high, o.low AS ohlc_low,
+      o.date AS ohlc_date,
       pr.composite_score, pr.rank_position, pr.total_peers,
       pr.date AS rank_date
     FROM stocks s
@@ -172,6 +177,9 @@ export async function getFullStockData(ticker: string) {
     LEFT JOIN LATERAL (
       SELECT * FROM technicals WHERE stock_id = s.id ORDER BY date DESC LIMIT 1
     ) t ON true
+    LEFT JOIN LATERAL (
+      SELECT * FROM ohlc WHERE stock_id = s.id ORDER BY date DESC LIMIT 1
+    ) o ON true
     LEFT JOIN LATERAL (
       SELECT * FROM peer_ranks WHERE stock_id = s.id ORDER BY date DESC LIMIT 1
     ) pr ON true
