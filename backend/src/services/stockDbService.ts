@@ -35,42 +35,65 @@ export async function getLatestFundamentals(stockId: number) {
   return res.rows; // [today, yesterday] for trend calculation
 }
 
+// Updated: now includes price_to_book, current_ratio, return_5yr_pct (migration 006)
 export async function upsertFundamentals(stockId: number, date: string, data: {
-  peRatio?:       number | null;
-  industryPe?:    number | null;
-  roce?:          number | null;
-  debtToEquity?:  number | null;
-  netProfit?:     number | null;
-  freeCashFlow?:  number | null;
-  profitGrowth5Y?:number | null;
-  pledgedPct?:    number | null;
-  marketCap?:     number | null;
-  cmp?:           number | null;
-  source?:        string;
+  peRatio?:        number | null;
+  industryPe?:     number | null;
+  roce?:           number | null;
+  debtToEquity?:   number | null;
+  netProfit?:      number | null;
+  freeCashFlow?:   number | null;
+  profitGrowth5Y?: number | null;
+  pledgedPct?:     number | null;
+  // New 3 ranking fields
+  priceToBook?:    number | null;
+  currentRatio?:   number | null;
+  return5YrPct?:   number | null;
+  // Display-only
+  marketCap?:      number | null;
+  cmp?:            number | null;
+  source?:         string;
 }) {
   await db.query(`
-    INSERT INTO fundamentals
-      (stock_id, date, pe_ratio, industry_pe, roce_pct, debt_to_equity,
-       net_profit_cr, free_cashflow_cr, profit_growth_5y, pledged_pct,
-       market_cap_cr, cmp, source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    INSERT INTO fundamentals (
+      stock_id, date,
+      pe_ratio, industry_pe, roce_pct, debt_to_equity,
+      net_profit_cr, free_cashflow_cr, profit_growth_5y, pledged_pct,
+      price_to_book, current_ratio, return_5yr_pct,
+      market_cap_cr, cmp, source
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     ON CONFLICT (stock_id, date) DO UPDATE SET
-      pe_ratio       = EXCLUDED.pe_ratio,
-      industry_pe    = EXCLUDED.industry_pe,
-      roce_pct       = EXCLUDED.roce_pct,
-      debt_to_equity = EXCLUDED.debt_to_equity,
-      net_profit_cr  = EXCLUDED.net_profit_cr,
-      free_cashflow_cr= EXCLUDED.free_cashflow_cr,
-      profit_growth_5y= EXCLUDED.profit_growth_5y,
-      pledged_pct    = EXCLUDED.pledged_pct,
-      market_cap_cr  = EXCLUDED.market_cap_cr,
-      cmp            = EXCLUDED.cmp,
-      source         = EXCLUDED.source
+      pe_ratio         = EXCLUDED.pe_ratio,
+      industry_pe      = EXCLUDED.industry_pe,
+      roce_pct         = EXCLUDED.roce_pct,
+      debt_to_equity   = EXCLUDED.debt_to_equity,
+      net_profit_cr    = EXCLUDED.net_profit_cr,
+      free_cashflow_cr = EXCLUDED.free_cashflow_cr,
+      profit_growth_5y = EXCLUDED.profit_growth_5y,
+      pledged_pct      = EXCLUDED.pledged_pct,
+      price_to_book    = EXCLUDED.price_to_book,
+      current_ratio    = EXCLUDED.current_ratio,
+      return_5yr_pct   = EXCLUDED.return_5yr_pct,
+      market_cap_cr    = EXCLUDED.market_cap_cr,
+      cmp              = EXCLUDED.cmp,
+      source           = EXCLUDED.source
   `, [
     stockId, date,
-    data.peRatio, data.industryPe, data.roce, data.debtToEquity,
-    data.netProfit, data.freeCashFlow, data.profitGrowth5Y, data.pledgedPct,
-    data.marketCap, data.cmp, data.source || 'MIXED'
+    data.peRatio    ?? null,
+    data.industryPe ?? null,
+    data.roce       ?? null,
+    data.debtToEquity   ?? null,
+    data.netProfit      ?? null,
+    data.freeCashFlow   ?? null,
+    data.profitGrowth5Y ?? null,
+    data.pledgedPct     ?? null,
+    data.priceToBook    ?? null,
+    data.currentRatio   ?? null,
+    data.return5YrPct   ?? null,
+    data.marketCap  ?? null,
+    data.cmp        ?? null,
+    data.source     || 'MIXED',
   ]);
 }
 
@@ -121,8 +144,8 @@ export async function upsertTechnicals(stockId: number, date: string, data: {
     INSERT INTO technicals (stock_id, date, pivot, r1, r2, s1, s2, ema20, ema50, ema100)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     ON CONFLICT (stock_id, date) DO UPDATE SET
-      pivot  = EXCLUDED.pivot, r1 = EXCLUDED.r1, r2 = EXCLUDED.r2,
-      s1     = EXCLUDED.s1,    s2 = EXCLUDED.s2,
+      pivot  = EXCLUDED.pivot, r1    = EXCLUDED.r1,    r2    = EXCLUDED.r2,
+      s1     = EXCLUDED.s1,    s2    = EXCLUDED.s2,
       ema20  = EXCLUDED.ema20, ema50 = EXCLUDED.ema50, ema100 = EXCLUDED.ema100
   `, [stockId, date, data.pivot, data.r1, data.r2, data.s1, data.s2, data.ema20, data.ema50, data.ema100]);
 }
@@ -153,6 +176,7 @@ export async function upsertPeerRank(stockId: number, date: string, data: {
 }
 
 // ─── Combined stock detail query (used by /api/v1/stock/:ticker) ──────────────
+// Updated: now selects price_to_book, current_ratio, return_5yr_pct
 export async function getFullStockData(ticker: string) {
   const res = await db.query(`
     SELECT
@@ -161,6 +185,7 @@ export async function getFullStockData(ticker: string) {
       f.pe_ratio, f.industry_pe, f.roce_pct, f.debt_to_equity,
       f.net_profit_cr, f.free_cashflow_cr, f.profit_growth_5y,
       f.pledged_pct, f.market_cap_cr,
+      f.price_to_book, f.current_ratio, f.return_5yr_pct,
       COALESCE(NULLIF(f.cmp, 0), o.close) AS cmp,
       f.source AS fund_source,
       t.date AS tech_date,
@@ -189,12 +214,14 @@ export async function getFullStockData(ticker: string) {
 }
 
 // ─── Get all peers for a sector ───────────────────────────────────────────────
+// Updated: now includes price_to_book, current_ratio, return_5yr_pct
 export async function getSectorPeers(sector: string, excludeTicker?: string) {
   const res = await db.query(`
     SELECT
       s.ticker, s.name,
-      f.pe_ratio, f.roce_pct, f.debt_to_equity, f.net_profit_cr,
-      f.free_cashflow_cr, f.profit_growth_5y, f.pledged_pct,
+      f.pe_ratio, f.roce_pct, f.debt_to_equity,
+      f.net_profit_cr, f.free_cashflow_cr, f.profit_growth_5y, f.pledged_pct,
+      f.price_to_book, f.current_ratio, f.return_5yr_pct,
       pr.composite_score, pr.rank_position
     FROM stocks s
     LEFT JOIN LATERAL (

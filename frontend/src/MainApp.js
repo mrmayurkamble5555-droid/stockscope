@@ -26,6 +26,104 @@ const S = {
   grid4:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10},
 };
 
+// ── Claude API call ────────────────────────────────────────────────────────────
+async function callClaude(systemPrompt, userMessage) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Claude API ${res.status}`);
+  const data = await res.json();
+  return data.content?.[0]?.text || "";
+}
+
+function buildSystemPrompt() {
+  return `You are a senior equity research analyst specializing in Indian stock markets (NSE/BSE).
+Respond ONLY with valid JSON. No markdown, no backticks, no preamble, no explanation.
+All monetary values in INR. Be specific, concise, and data-driven.`;
+}
+
+function buildAnalysisPrompt(ticker, stockData) {
+  const f = stockData?.fundamentals || {};
+  const t = stockData?.technicals || {};
+  const h = stockData?.header || {};
+  const pr = stockData?.priceRange || {};
+  const peers = stockData?.peers || {};
+
+  const fv = (m) => { if (!m) return "N/A"; if (m.value!=null) return m.value; if (m.rawValue!=null) return m.rawValue; return "N/A"; };
+  const cmp = t.cmp || h.cmp || 0;
+
+  return `Analyze ${ticker} (${h.name || ticker}) on NSE.
+
+Market Data:
+- CMP: ₹${cmp}
+- Sector: ${h.sector || "N/A"}
+- Industry: ${h.industry || "N/A"}
+- 52W High: ₹${pr.week52High || "N/A"}
+- 52W Low: ₹${pr.week52Low || "N/A"}
+- ATH: ₹${pr.allTimeHigh || "N/A"}
+- Sector Rank: #${peers.rank || "N/A"} of ${peers.totalPeers || "N/A"}
+
+Fundamentals:
+- P/E Ratio: ${fv(f.peRatio)}
+- ROCE: ${fv(f.roce)}%
+- Debt/Equity: ${fv(f.debtToEquity)}
+- Net Profit (Cr): ${fv(f.netProfit)}
+- Free Cash Flow (Cr): ${fv(f.freeCashFlow)}
+- 5Y Profit Growth: ${fv(f.profitGrowth5Y)}%
+- Pledged %: ${fv(f.pledgedPct)}%
+
+Technicals:
+- Pivot: ₹${t.pivot || "N/A"}
+- R1: ₹${t.r1 || "N/A"}, R2: ₹${t.r2 || "N/A"}
+- S1: ₹${t.s1 || "N/A"}, S2: ₹${t.s2 || "N/A"}
+- EMA20: ₹${t.ema20 || "N/A"}, EMA50: ₹${t.ema50 || "N/A"}, EMA100: ₹${t.ema100 || "N/A"}
+
+Return ONLY this exact JSON (no other text):
+{
+  "aiRating": 7.5,
+  "confidence": "HIGH",
+  "tradingPattern": "Cup and Handle",
+  "patternConfidence": 78,
+  "swingHypothesis": {
+    "upsideTarget": 450,
+    "stopLoss": 385,
+    "rrRatio": 2.5,
+    "timeframe": "4-6 weeks",
+    "note": "one sentence note on the setup"
+  },
+  "intrinsicValue": 485,
+  "valuationUpside": 21.0,
+  "valuationNote": "two sentence note on valuation",
+  "zones": {
+    "strongBuy": 370,
+    "buyZone": 395,
+    "fairZone": 450,
+    "avoidAbove": 520
+  },
+  "aiEntry": {
+    "isInBuyZone": true,
+    "entryNote": "one sentence on current entry opportunity",
+    "targetOnRebound": 450
+  },
+  "sectorBreakdown": "two sentences on why the stock has this sector rank, citing a specific driver",
+  "dueDiligence": {
+    "fundamentalStrengths": "two sentences",
+    "technicalSetup": "two sentences",
+    "movingAverages": "one sentence",
+    "riskFactors": "two sentences"
+  },
+  "sentimentNote": "one sentence market sentiment note for this stock"
+}`;
+}
+
+// ── Shared UI Primitives ───────────────────────────────────────────────────────
 function Logo({size=36}){
   return(<svg width={size} height={size} viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg"><rect width="72" height="72" rx="18" fill="#0f172a"/><text x="10" y="50" fontFamily="Georgia,serif" fontSize="38" fontWeight="900" fill="#16a34a">S</text><polyline points="42,44 50,30 58,30" stroke="#16a34a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none"/><polyline points="52,25 58,30 53,35" stroke="#16a34a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none"/></svg>);
 }
@@ -35,36 +133,53 @@ function Badge({label,color,bg,size=11}){
 function MetricBox({label,value,color,sub}){
   return(<div style={{backgroundColor:C.surfaceAlt,borderRadius:10,padding:"11px 13px",border:`1px solid ${C.border}`}}><div style={{fontSize:11,color:C.textThird,marginBottom:3,fontWeight:600,textTransform:"uppercase",letterSpacing:".5px"}}>{label}</div><div style={{fontSize:15,fontWeight:700,color:color||C.textPrimary}}>{value}</div>{sub&&<div style={{fontSize:10,color:C.textThird,marginTop:2}}>{sub}</div>}</div>);
 }
-function RankHero({rank,total,sector}){
+function RankHero({rank,total,sector,aiEnabled,aiNote,aiNoteLoading}){
+  const [showNote,setShowNote]=useState(false);
+  useEffect(()=>setShowNote(false),[rank]);
   if(!rank||!total) return null;
   const pct=((rank/total)*100).toFixed(0);
   const isTop=rank<=Math.ceil(total*0.25);
   const color=isTop?C.green:rank<=Math.ceil(total*0.5)?C.amber:C.red;
   const label=isTop?"Top Performer":rank<=Math.ceil(total*0.5)?"Mid Tier":"Lagging";
   return(
-    <div style={{background:`linear-gradient(135deg,${C.surfaceAlt} 0%,${C.surface} 100%)`,border:`2px solid ${color}`,borderRadius:14,padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
-      <div>
-        <div style={{fontSize:11,color:C.textThird,fontWeight:600,textTransform:"uppercase",letterSpacing:".5px",marginBottom:4}}>Sector Rank · {sector}</div>
-        <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-          <span style={{fontSize:52,fontWeight:900,color,lineHeight:1,fontFamily:"Georgia,serif"}}>#{rank}</span>
-          <span style={{fontSize:18,color:C.textThird,fontWeight:500}}>/ {total}</span>
+    <div style={{background:`linear-gradient(135deg,${C.surfaceAlt} 0%,${C.surface} 100%)`,border:`2px solid ${color}`,borderRadius:14,padding:"16px 20px",marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+        <div>
+          <div style={{fontSize:11,color:C.textThird,fontWeight:600,textTransform:"uppercase",letterSpacing:".5px",marginBottom:4}}>Sector Rank · {sector}</div>
+          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+            <span style={{fontSize:52,fontWeight:900,color,lineHeight:1,fontFamily:"Georgia,serif"}}>#{rank}</span>
+            <span style={{fontSize:18,color:C.textThird,fontWeight:500}}>/ {total}</span>
+          </div>
+          <div style={{marginTop:6,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <Badge label={label} color={color===C.green?C.greenText:color===C.amber?C.amberText:C.redText} bg={color===C.green?C.greenLight:color===C.amber?C.amberLight:C.redLight} size={12}/>
+            {aiEnabled&&(
+              <button onClick={()=>setShowNote(v=>!v)} style={{display:"flex",alignItems:"center",gap:4,background:C.purpleLight,border:`1px solid ${C.purple}44`,borderRadius:999,padding:"3px 10px",cursor:"pointer",fontSize:11,fontWeight:600,color:C.purple}}>
+                ✦ AI Note
+              </button>
+            )}
+          </div>
         </div>
-        <div style={{marginTop:6}}><Badge label={label} color={color===C.green?C.greenText:color===C.amber?C.amberText:C.redText} bg={color===C.green?C.greenLight:color===C.amber?C.amberLight:C.redLight} size={12}/></div>
+        <div style={{textAlign:"center"}}>
+          <svg width="80" height="80" viewBox="0 0 80 80">
+            <circle cx="40" cy="40" r="32" fill="none" stroke={C.border} strokeWidth="6"/>
+            <circle cx="40" cy="40" r="32" fill="none" stroke={color} strokeWidth="6" strokeDasharray={`${(1-rank/total)*201} 201`} strokeLinecap="round" transform="rotate(-90 40 40)" style={{transition:"stroke-dasharray .6s ease"}}/>
+            <text x="40" y="45" textAnchor="middle" fontSize="18" fontWeight="800" fill={color} fontFamily="Georgia,serif">{100-parseInt(pct)}%</text>
+          </svg>
+          <div style={{fontSize:10,color:C.textThird,marginTop:-4}}>Better than</div>
+        </div>
       </div>
-      <div style={{textAlign:"center"}}>
-        <svg width="80" height="80" viewBox="0 0 80 80">
-          <circle cx="40" cy="40" r="32" fill="none" stroke={C.border} strokeWidth="6"/>
-          <circle cx="40" cy="40" r="32" fill="none" stroke={color} strokeWidth="6" strokeDasharray={`${(1-rank/total)*201} 201`} strokeLinecap="round" transform="rotate(-90 40 40)" style={{transition:"stroke-dasharray .6s ease"}}/>
-          <text x="40" y="45" textAnchor="middle" fontSize="18" fontWeight="800" fill={color} fontFamily="Georgia,serif">{100-parseInt(pct)}%</text>
-        </svg>
-        <div style={{fontSize:10,color:C.textThird,marginTop:-4}}>Better than</div>
-      </div>
+      {aiEnabled&&showNote&&(
+        <div style={{marginTop:12,background:C.purpleLight,border:`1px solid ${C.purple}33`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.textSecond,lineHeight:1.6,animation:"fadeInDown .2s ease"}}>
+          <span style={{color:C.purple,fontWeight:700}}>✦ AI Sector Breakdown:</span>{" "}
+          {aiNoteLoading ? <span style={{color:C.textThird,fontStyle:"italic"}}>Analysing...</span> : (aiNote || "—")}
+        </div>
+      )}
     </div>
   );
 }
 
-// ── Market Mood — calls backend /api/v1/mood proxy (fixes CORS + "Live data unavailable") ──
-function MarketMoodMeter(){
+// ── Market Mood ────────────────────────────────────────────────────────────────
+function MarketMoodMeter({aiEnabled,aiSentimentNote}){
   const [mood,setMood]=useState(null);
   const [loading,setLoading]=useState(true);
 
@@ -72,10 +187,7 @@ function MarketMoodMeter(){
     setLoading(true);
     fetch(`${backendBase}/mood`)
       .then(r=>r.ok?r.json():null)
-      .then(d=>{
-        if(d) setMood(d);
-        else setMood({value:50,chg:"0.00",hasData:false});
-      })
+      .then(d=>{ if(d) setMood(d); else setMood({value:50,chg:"0.00",hasData:false}); })
       .catch(()=>setMood({value:50,chg:"0.00",hasData:false}))
       .finally(()=>setLoading(false));
   },[]);
@@ -117,6 +229,11 @@ function MarketMoodMeter(){
         </div>}
         {mood&&!mood.hasData&&<div style={{fontSize:10,color:C.textThird,marginTop:2}}>Market data estimate</div>}
       </div>
+      {aiEnabled&&aiSentimentNote&&(
+        <div style={{marginTop:10,padding:"8px 10px",background:C.purpleLight,borderRadius:8,border:`1px solid ${C.purple}22`,fontSize:11,color:C.textSecond,lineHeight:1.5}}>
+          <span style={{color:C.purple,fontWeight:700}}>↑ AI Sentiment:</span> {aiSentimentNote}
+        </div>
+      )}
     </div>
   );
 }
@@ -182,7 +299,7 @@ function TrendingStocks({onSelectStock}){
 
 // ── Search Bar ────────────────────────────────────────────────────────────────
 function SearchBar({onSearch,onSelectStock}){
-  const [query,setQuery]=useState("VBL");
+  const [query,setQuery]=useState("");
   const [suggs,setSuggs]=useState([]);
   const [showSugg,setShowSugg]=useState(false);
   const [loading,setLoading]=useState(false);
@@ -195,7 +312,6 @@ function SearchBar({onSearch,onSelectStock}){
     try{
       const r=await fetch(`${backendBase}/search?q=${encodeURIComponent(q)}`);
       const d=await r.json();
-      // FIX: safely unwrap array whether API returns [] or { results: [] }
       setSuggs(Array.isArray(d)?d:Array.isArray(d?.results)?d.results:[]);
     }
     catch{setSuggs([]);}
@@ -219,7 +335,6 @@ function SearchBar({onSearch,onSelectStock}){
   return(
     <div ref={wrapRef} style={{position:"relative",flex:1}}>
       <div style={{display:"flex",gap:10}}>
-        {/* FIX: merged duplicate onFocus into one handler */}
         <input value={query} onChange={handleChange}
           onFocus={e=>{e.target.style.borderColor=C.green; if(query.length>0) setShowSugg(true);}}
           onBlur={e=>e.target.style.borderColor=C.border}
@@ -266,10 +381,7 @@ function Screener({onSelectStock}){
     setLoadingSectors(true);setSectorError(false);
     fetch(`${backendBase}/screener`)
       .then(r=>{if(!r.ok) throw new Error();return r.json();})
-      .then(d=>{
-        const secs=(d.sectors||[]).filter(s=>s.sector&&s.count>0);
-        setSectors(secs);
-      })
+      .then(d=>{ const secs=(d.sectors||[]).filter(s=>s.sector&&s.count>0); setSectors(secs); })
       .catch(()=>setSectorError(true))
       .finally(()=>setLoadingSectors(false));
   },[]);
@@ -299,12 +411,12 @@ function Screener({onSelectStock}){
       {!loadingSectors&&!sectorError&&(
         <>
           <div style={{fontSize:12,color:C.textThird,marginBottom:14}}>
-            {sectors.length} sectors · {sectors.reduce((a,s)=>a+s.count,0).toLocaleString()} stocks total
+            {sectors.length} sectors · NSE listed
           </div>
           <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:16}}>
             {sectors.map(s=>(
               <button key={s.sector} onClick={()=>handleSector(s.sector)} style={S.pill(sector===s.sector)}>
-                {s.sector}<span style={{fontSize:10,marginLeft:4,opacity:.6}}>({s.count})</span>
+                {s.sector}{sector===s.sector&&stocks.length>0&&<span style={{fontSize:10,marginLeft:4,opacity:.6}}>({stocks.length})</span>}
               </button>
             ))}
           </div>
@@ -375,6 +487,195 @@ function Screener({onSelectStock}){
   );
 }
 
+// ── AI Analysis Tab ───────────────────────────────────────────────────────────
+function AIAnalysisTab({ ai, loading, error, onRetry, cmp }) {
+  if (loading) {
+    return (
+      <div style={S.card}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+          <div style={{width:32,height:32,borderRadius:"50%",background:C.purpleLight,border:`2px solid ${C.purple}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>✦</div>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color:C.textPrimary}}>Running AI Analysis...</div>
+            <div style={{fontSize:11,color:C.textThird}}>Claude is analysing fundamentals, technicals & sector data</div>
+          </div>
+        </div>
+        {[90,70,80,60,75].map((w,i)=>(
+          <div key={i} style={{height:14,borderRadius:6,background:C.border,marginBottom:10,width:`${w}%`,animation:"shimmer 1.4s infinite"}}/>
+        ))}
+        <style>{`@keyframes shimmer{0%,100%{opacity:.4}50%{opacity:1}}`}</style>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div style={S.card}>
+        <div style={{color:C.red,fontSize:13,marginBottom:10}}>⚠ {error}</div>
+        <button onClick={onRetry} style={{...S.greenBtn,width:"auto",fontSize:12,padding:"7px 18px"}}>Retry Analysis</button>
+      </div>
+    );
+  }
+  if (!ai) {
+    return (
+      <div style={S.card}>
+        <div style={{textAlign:"center",padding:"24px 0",color:C.textThird}}>
+          <div style={{fontSize:28,marginBottom:8}}>🤖</div>
+          <div style={{fontSize:14,fontWeight:600}}>No AI analysis yet</div>
+          <div style={{fontSize:12,marginTop:4}}>Select a stock to run AI analysis</div>
+        </div>
+      </div>
+    );
+  }
+
+  const upsidePct = ai.swingHypothesis?.upsideTarget && cmp
+    ? (((ai.swingHypothesis.upsideTarget - cmp) / cmp) * 100).toFixed(1)
+    : null;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <style>{`@keyframes fadeInDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}`}</style>
+
+      {/* Row 1: AI Rating + Swing Hypothesis */}
+      <div style={S.grid2}>
+        {/* AI Rating */}
+        <div style={{...S.card,display:"flex",flexDirection:"column",alignItems:"center",gap:8,padding:16}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.purple,background:C.purpleLight,borderRadius:20,padding:"2px 10px",letterSpacing:".05em"}}>✦ AI RATING</div>
+          <svg width="72" height="82" viewBox="0 0 64 72">
+            <path d="M32 4 L58 16 L58 36 C58 52 46 64 32 68 C18 64 6 52 6 36 L6 16 Z"
+              fill={C.purpleLight} stroke={C.purple} strokeWidth="2.5"/>
+            <text x="32" y="44" textAnchor="middle" fontSize="20" fontWeight="800" fill={C.purple} fontFamily="Georgia,serif">{ai.aiRating}</text>
+          </svg>
+          <div style={{fontSize:13,fontWeight:700,color:C.textPrimary,fontFamily:"Georgia,serif"}}>{ai.aiRating} / 10</div>
+          <div style={{fontSize:10,fontWeight:700,color:ai.confidence==="HIGH"?C.green:ai.confidence==="MEDIUM"?C.amber:C.red,background:ai.confidence==="HIGH"?C.greenLight:ai.confidence==="MEDIUM"?C.amberLight:C.redLight,borderRadius:20,padding:"2px 10px"}}>
+            AI CONFIDENCE: {ai.confidence}
+          </div>
+        </div>
+
+        {/* Swing Hypothesis */}
+        <div style={{...S.card,padding:16}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.purple,background:C.purpleLight,borderRadius:20,padding:"2px 10px",letterSpacing:".05em",display:"inline-block",marginBottom:12}}>✦ SWING HYPOTHESIS</div>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,color:C.textSecond}}>🎯 Upside Target</span>
+              <span style={{fontSize:13,fontWeight:700,color:C.green}}>₹{ai.swingHypothesis?.upsideTarget}
+                {upsidePct&&<span style={{fontSize:10,color:C.textThird,fontWeight:400}}> (+{upsidePct}%)</span>}
+              </span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,color:C.textSecond}}>🛑 Stop Loss</span>
+              <span style={{fontSize:13,fontWeight:700,color:C.red}}>₹{ai.swingHypothesis?.stopLoss}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,color:C.textSecond}}>⚖️ R:R Ratio</span>
+              <span style={{fontSize:13,fontWeight:700,color:C.textPrimary}}>{ai.swingHypothesis?.rrRatio}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,color:C.textSecond}}>⏳ Timeframe</span>
+              <span style={{fontSize:12,color:C.textSecond}}>{ai.swingHypothesis?.timeframe}</span>
+            </div>
+            {ai.swingHypothesis?.note&&(
+              <div style={{marginTop:4,fontSize:11,color:C.textThird,fontStyle:"italic",lineHeight:1.5,borderTop:`1px solid ${C.border}`,paddingTop:8}}>
+                {ai.swingHypothesis.note}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Trading Pattern */}
+      <div style={{...S.card,padding:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:10,fontWeight:700,color:C.purple,background:C.purpleLight,borderRadius:20,padding:"2px 10px",letterSpacing:".05em",display:"inline-block",marginBottom:8}}>✦ TRADING PATTERN</div>
+            <div style={{fontSize:16,fontWeight:700,color:C.textPrimary}}>{ai.tradingPattern}</div>
+            <div style={{fontSize:11,color:C.textThird,marginTop:2}}>Pattern identified by AI analysis</div>
+          </div>
+          <div style={{textAlign:"center"}}>
+            <svg width="52" height="52" viewBox="0 0 52 52">
+              <circle cx="26" cy="26" r="22" fill="none" stroke={C.border} strokeWidth="4"/>
+              <circle cx="26" cy="26" r="22" fill="none" stroke={C.purple} strokeWidth="4"
+                strokeDasharray={`${(ai.patternConfidence/100)*138} 138`}
+                strokeLinecap="round" transform="rotate(-90 26 26)"/>
+              <text x="26" y="31" textAnchor="middle" fontSize="13" fontWeight="800" fill={C.purple}>{ai.patternConfidence}%</text>
+            </svg>
+            <div style={{fontSize:9,color:C.textThird,marginTop:2}}>confidence</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Intrinsic Value + Zones */}
+      <div style={{...S.card,background:"#0f172a",border:"none",padding:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color:"#f8fafc"}}>AI Intrinsic Value</div>
+            <div style={{fontSize:10,color:"#64748b",marginTop:2}}>Computed from sector, fundamentals & technicals</div>
+          </div>
+          <span style={{background:C.green,color:"#fff",fontSize:11,fontWeight:700,borderRadius:6,padding:"3px 10px"}}>
+            ₹{ai.intrinsicValue}
+          </span>
+        </div>
+        {ai.valuationNote&&(
+          <div style={{background:"#1e293b",borderRadius:8,padding:"10px 12px",marginBottom:12,border:"1px solid #22c55e33"}}>
+            <div style={{fontSize:11,color:"#4ade80",fontWeight:600,marginBottom:4}}>
+              +{ai.valuationUpside}% Upside from CMP
+            </div>
+            <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.5}}>{ai.valuationNote}</div>
+          </div>
+        )}
+        <div style={S.grid2}>
+          {[
+            ["STRONG BUY",ai.zones?.strongBuy,C.green,"#f0fdf4"],
+            ["BUY ZONE",ai.zones?.buyZone,"#0891b2","#f0f9ff"],
+            ["FAIR ZONE",ai.zones?.fairZone,C.amber,C.amberLight],
+            ["AVOID ZONE",ai.zones?.avoidAbove,C.red,C.redLight],
+          ].map(([label,val,color,bg])=>(
+            <div key={label} style={{background:bg,border:`1px solid ${color}33`,borderRadius:8,padding:"9px 11px"}}>
+              <div style={{fontSize:9,fontWeight:700,color,letterSpacing:".05em",marginBottom:3}}>{label}</div>
+              <div style={{fontSize:16,fontWeight:800,color:C.textPrimary,fontFamily:"Georgia,serif"}}>{val?`₹${val}`:"—"}</div>
+            </div>
+          ))}
+        </div>
+        {ai.aiEntry&&(
+          <div style={{marginTop:12,background:"#1e293b",borderRadius:8,padding:"12px",border:"1px solid #33415577"}}>
+            <div style={{fontSize:9,color:C.purple,fontWeight:700,letterSpacing:".08em",marginBottom:6}}>AI ENTRY SIGNAL</div>
+            <div style={{fontSize:12,color:"#e2e8f0",lineHeight:1.5}}>{ai.aiEntry.entryNote}</div>
+            {ai.aiEntry.targetOnRebound&&(
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:6}}>
+                AI targets rebound to <strong style={{color:"#4ade80"}}>₹{ai.aiEntry.targetOnRebound}</strong>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Full Due Diligence */}
+      <div style={S.card}>
+        <div style={{fontSize:10,fontWeight:700,color:C.purple,background:C.purpleLight,borderRadius:20,padding:"2px 10px",letterSpacing:".05em",display:"inline-block",marginBottom:14}}>✦ FULL AI DUE DILIGENCE</div>
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {[
+            {icon:"📊",label:"Fundamental Strengths",key:"fundamentalStrengths"},
+            {icon:"📈",label:"Technical Setup",key:"technicalSetup"},
+            {icon:"〰️",label:"Moving Averages",key:"movingAverages"},
+            {icon:"⚠️",label:"Risk Factors",key:"riskFactors"},
+          ].map(({icon,label,key})=>(
+            <div key={key}>
+              <div style={{fontSize:11,fontWeight:700,color:C.textSecond,textTransform:"uppercase",letterSpacing:".04em",marginBottom:3}}>
+                {icon} {label}
+              </div>
+              <div style={{fontSize:12,color:C.textSecond,lineHeight:1.6,paddingLeft:20}}>
+                {ai.dueDiligence?.[key]||"—"}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{fontSize:10,color:C.textThird,textAlign:"center",paddingBottom:8}}>
+        For educational use only. Not SEBI-registered investment advice.
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App(){
   const [results,setResults]=useState([]);
@@ -382,6 +683,29 @@ export default function App(){
   const [priceRange,setPriceRange]=useState(null);
   const [activeTab,setActiveTab]=useState("overview");
   const [view,setView]=useState("stock");
+
+  // AI State
+  const [aiEnabled,setAiEnabled]=useState(true);
+  const [aiData,setAiData]=useState(null);
+  const [aiLoading,setAiLoading]=useState(false);
+  const [aiError,setAiError]=useState(null);
+  const lastAiTicker=useRef(null);
+
+  const runAI=useCallback(async(ticker,stockDataForAI,priceRangeForAI)=>{
+    if(!ticker||!aiEnabled) return;
+    setAiLoading(true);setAiError(null);setAiData(null);
+    try{
+      const combined={...stockDataForAI,priceRange:priceRangeForAI};
+      const raw=await callClaude(buildSystemPrompt(),buildAnalysisPrompt(ticker,combined));
+      const clean=raw.replace(/```json|```/g,"").trim();
+      setAiData(JSON.parse(clean));
+      lastAiTicker.current=ticker;
+    }catch(e){
+      setAiError("AI analysis unavailable. Please try again.");
+    }finally{
+      setAiLoading(false);
+    }
+  },[aiEnabled]);
 
   const loadStock=useCallback(async(ticker)=>{
     if(!ticker) return;
@@ -393,22 +717,24 @@ export default function App(){
       const stockData=await stockRes.json();
       const rangeData=rangeRes.ok?await rangeRes.json():null;
       setSelected(stockData);setPriceRange(rangeData);setActiveTab("overview");setView("stock");
+      setAiData(null);setAiError(null);lastAiTicker.current=null;
+      // Auto-run AI if enabled
+      if(aiEnabled) runAI(ticker,stockData,rangeData);
     }catch(e){console.error(e);}
-  },[]);
+  },[aiEnabled,runAI]);
 
   const handleSearch=async(query)=>{
     if(!query) return;
     try{
       const res=await fetch(`${backendBase}/search?q=${encodeURIComponent(query)}`);
       const data=await res.json();
-      // FIX: safely unwrap array
       const arr=Array.isArray(data)?data:Array.isArray(data?.results)?data.results:[];
       setResults(arr);
       if(arr.length>0) loadStock(arr[0].ticker);
     }catch(e){console.error(e);}
   };
 
-  useEffect(()=>{loadStock("VBL");},[loadStock]);
+  useEffect(()=>{},[]);// placeholder — no auto-load on startup
 
   const t=selected?.technicals||{};
   const f=selected?.fundamentals||{};
@@ -418,10 +744,33 @@ export default function App(){
   const epsNum=parseFloat(fval(f.eps)||fval(f.epsBasic)||0)||0;
   const rank=selected?.peers?.rank;
   const total=selected?.peers?.totalPeers;
-  const tabBtn=(id,label)=>(<button key={id} onClick={()=>setActiveTab(id)} style={{...S.pill(activeTab===id),padding:"7px 16px"}}>{label}</button>);
+
+  const tabBtn=(id,label,isAI=false)=>(
+    <button key={id} onClick={()=>setActiveTab(id)} style={{
+      ...S.pill(activeTab===id),
+      padding:"7px 16px",
+      ...(isAI&&activeTab!==id?{borderColor:`${C.purple}44`,color:C.purple,background:C.purpleLight}:{}),
+      ...(isAI&&activeTab===id?{borderColor:C.purple,background:C.purple,color:"#fff"}:{}),
+    }}>{label}</button>
+  );
+
+  // AI toggle handler — re-runs analysis if turning on and no data yet
+  const handleAIToggle=()=>{
+    const next=!aiEnabled;
+    setAiEnabled(next);
+    if(next&&selected&&!aiData&&!aiLoading){
+      setTimeout(()=>runAI(header.ticker,selected,priceRange),50);
+    }
+  };
 
   return(
     <div style={{minHeight:"100vh",background:C.bg,color:C.textPrimary,fontFamily:"Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",fontSize:14}}>
+      <style>{`
+        @keyframes fadeInDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+        @keyframes shimmer{0%,100%{opacity:.4}50%{opacity:1}}
+      `}</style>
+
+      {/* ── Header ── */}
       <header style={{height:62,borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 28px",background:C.surface,position:"sticky",top:0,zIndex:50,boxShadow:"0 1px 6px rgba(0,0,0,0.07)"}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <Logo size={38}/>
@@ -430,10 +779,24 @@ export default function App(){
             <div style={{fontSize:10,color:C.textThird,fontWeight:500,letterSpacing:".5px"}}>INVESTOR RESEARCH WORKSPACE</div>
           </div>
         </div>
-        <nav style={{display:"flex",gap:8}}>
+        <nav style={{display:"flex",gap:8,alignItems:"center"}}>
           {[["stock","🔍 Stocks"],["screener","📊 Screener"],["trending","🔥 Trending"]].map(([v,l])=>(
             <button key={v} onClick={()=>setView(v)} style={S.pill(view===v)}>{l}</button>
           ))}
+          {/* AI Insights Toggle */}
+          <div onClick={handleAIToggle} style={{
+            display:"flex",alignItems:"center",gap:6,
+            background:aiEnabled?C.purpleLight:"#f9fafb",
+            border:`1px solid ${aiEnabled?C.purple+"44":C.border}`,
+            borderRadius:999,padding:"5px 12px 5px 10px",
+            cursor:"pointer",userSelect:"none",transition:"all .2s",marginLeft:4,
+          }}>
+            <span style={{fontSize:13}}>🤖</span>
+            <span style={{fontSize:12,fontWeight:600,color:aiEnabled?C.purple:C.textThird}}>AI Insights</span>
+            <div style={{width:28,height:16,borderRadius:8,background:aiEnabled?C.purple:"#d1d5db",position:"relative",transition:"background .2s"}}>
+              <div style={{width:12,height:12,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:aiEnabled?14:2,transition:"left .2s"}}/>
+            </div>
+          </div>
         </nav>
         <div style={{fontSize:11,color:C.textThird}}>Educational use only</div>
       </header>
@@ -443,7 +806,7 @@ export default function App(){
         {view==="trending"&&(
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
             <TrendingStocks onSelectStock={loadStock}/>
-            <MarketMoodMeter/>
+            <MarketMoodMeter aiEnabled={aiEnabled} aiSentimentNote={aiData?.sentimentNote}/>
           </div>
         )}
         {view==="stock"&&(
@@ -472,14 +835,24 @@ export default function App(){
                       <div style={{fontSize:14,fontWeight:600}}>{header.sector||"—"}</div>
                       <div style={{fontSize:11,color:C.textThird}}>{header.exchange||"NSE"} · {header.industry||"—"}</div>
                     </div>
+                    {/* AI Forecast badge in search bar */}
+                    {aiEnabled&&(
+                      <div style={{marginLeft:"auto",display:"flex",alignItems:"center"}}>
+                        <button onClick={()=>setActiveTab("ai")} style={{display:"flex",alignItems:"center",gap:5,background:C.purpleLight,border:`1px solid ${C.purple}44`,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:600,color:C.purple}}>
+                          📈 AI Forecast
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-              <MarketMoodMeter/>
+              <MarketMoodMeter aiEnabled={aiEnabled} aiSentimentNote={aiData?.sentimentNote}/>
             </div>
+
             {selected&&(
               <section style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 300px",gap:20}}>
                 <div>
+                  {/* Stock header card */}
                   <div style={{...S.card,marginBottom:16}}>
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12}}>
                       <div>
@@ -512,7 +885,12 @@ export default function App(){
                         </div>
                       );
                     })()}
-                    <RankHero rank={rank} total={total} sector={header.sector}/>
+                    <RankHero
+                      rank={rank} total={total} sector={header.sector}
+                      aiEnabled={aiEnabled}
+                      aiNote={aiData?.sectorBreakdown}
+                      aiNoteLoading={aiLoading}
+                    />
                     {priceRange&&(
                       <div style={S.grid4}>
                         {[["52W High",priceRange.week52High,C.green],["52W Low",priceRange.week52Low,C.amber],["All-Time High",priceRange.allTimeHigh,C.purple],["All-Time Low",priceRange.allTimeLow,C.textThird]].map(([l,v,c])=>(
@@ -524,25 +902,59 @@ export default function App(){
                       </div>
                     )}
                   </div>
+
+                  {/* Tab bar — now includes AI Analysis */}
                   <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
-                    {tabBtn("overview","Overview")}{tabBtn("fundamentals","Fundamentals")}{tabBtn("technicals","Technicals")}{tabBtn("peers","Peers")}
+                    {tabBtn("overview","Overview")}
+                    {tabBtn("fundamentals","Fundamentals")}
+                    {tabBtn("technicals","Technicals")}
+                    {tabBtn("peers","Peers")}
+                    {aiEnabled&&tabBtn("ai","🤖 AI Analysis",true)}
                   </div>
+
+                  {/* Overview Tab */}
                   {activeTab==="overview"&&(
                     <div style={S.card}>
                       <div style={{fontSize:13,fontWeight:700,color:C.textSecond,marginBottom:12,textTransform:"uppercase",letterSpacing:".5px"}}>Snapshot</div>
                       <div style={S.grid2}>
                         {[["CMP",cmp>0?fmt(cmp):"NA",C.green],["Sector",header.sector||"NA",null],["Exchange",header.exchange||"NSE",null],["Industry",header.industry||"NA",null],["P/E Ratio",fval(f.peRatio),null],["ROCE %",fval(f.roce),null],["Debt/Equity",fval(f.debtToEquity),null],["Sector Rank",rank?`#${rank} of ${total}`:"NA",C.green]].map(([l,v,c])=><MetricBox key={l} label={l} value={v} color={c}/>)}
                       </div>
+                      {/* AI summary strip on overview when enabled */}
+                      {aiEnabled&&(aiLoading||aiData)&&(
+                        <div style={{marginTop:16,padding:"12px 14px",background:C.purpleLight,border:`1px solid ${C.purple}22`,borderRadius:10}}>
+                          <div style={{fontSize:11,fontWeight:700,color:C.purple,marginBottom:6}}>✦ AI Quick Read</div>
+                          {aiLoading?(
+                            <div style={{fontSize:12,color:C.textThird,fontStyle:"italic"}}>Running AI analysis...</div>
+                          ):(
+                            <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                              <div style={{fontSize:12,color:C.textSecond}}><strong style={{color:C.purple}}>Rating:</strong> {aiData?.aiRating}/10 ({aiData?.confidence})</div>
+                              <div style={{fontSize:12,color:C.textSecond}}><strong style={{color:C.purple}}>Pattern:</strong> {aiData?.tradingPattern}</div>
+                              <div style={{fontSize:12,color:C.textSecond}}><strong style={{color:C.green}}>Target:</strong> ₹{aiData?.swingHypothesis?.upsideTarget}</div>
+                              <div style={{fontSize:12,color:C.textSecond}}><strong style={{color:C.red}}>Stop:</strong> ₹{aiData?.swingHypothesis?.stopLoss}</div>
+                              <button onClick={()=>setActiveTab("ai")} style={{fontSize:11,fontWeight:600,color:C.purple,background:"none",border:`1px solid ${C.purple}44`,borderRadius:6,padding:"2px 10px",cursor:"pointer"}}>Full Analysis →</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  {/* Fundamentals Tab */}
                   {activeTab==="fundamentals"&&(
                     <div style={S.card}>
                       <div style={{fontSize:13,fontWeight:700,color:C.textSecond,marginBottom:12,textTransform:"uppercase",letterSpacing:".5px"}}>Fundamentals</div>
                       <div style={S.grid2}>
                         {[["P/E Ratio",fval(f.peRatio),f.peRatio?.context],["ROCE %",fval(f.roce),null],["Debt / Equity",fval(f.debtToEquity),null],["Net Profit (Cr)",fval(f.netProfit),null],["Free Cash Flow",fval(f.freeCashFlow),null],["5Yr Profit Growth",fval(f.profitGrowth5Y),null],["Pledged %",fval(f.pledgedPct),null],["52W High / Low",priceRange?`${fmt(priceRange.week52High)} / ${fmt(priceRange.week52Low)}`:"NA",null]].map(([l,v,ctx])=><MetricBox key={l} label={l} value={v} sub={ctx}/>)}
                       </div>
+                      {aiEnabled&&aiData?.dueDiligence?.fundamentalStrengths&&(
+                        <div style={{marginTop:14,padding:"10px 14px",background:C.purpleLight,border:`1px solid ${C.purple}22`,borderRadius:10,fontSize:12,color:C.textSecond,lineHeight:1.6}}>
+                          <span style={{color:C.purple,fontWeight:700}}>✦ AI Fundamental Read:</span> {aiData.dueDiligence.fundamentalStrengths}
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  {/* Technicals Tab */}
                   {activeTab==="technicals"&&(
                     <div style={S.card}>
                       <div style={{fontSize:13,fontWeight:700,color:C.textSecond,marginBottom:12,textTransform:"uppercase",letterSpacing:".5px"}}>Technical Levels</div>
@@ -554,12 +966,19 @@ export default function App(){
                           </div>
                         ))}
                       </div>
+                      {aiEnabled&&aiData?.dueDiligence?.technicalSetup&&(
+                        <div style={{marginTop:14,padding:"10px 14px",background:C.purpleLight,border:`1px solid ${C.purple}22`,borderRadius:10,fontSize:12,color:C.textSecond,lineHeight:1.6}}>
+                          <span style={{color:C.purple,fontWeight:700}}>✦ AI Technical Read:</span> {aiData.dueDiligence.technicalSetup}
+                        </div>
+                      )}
                       <div style={{marginTop:16,borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
                         <div style={{padding:"10px 16px",background:C.surfaceAlt,borderBottom:`1px solid ${C.border}`,fontSize:11,color:C.textSecond,fontWeight:700,textTransform:"uppercase",letterSpacing:".5px"}}>Candlestick · Pivot / Support / Resistance</div>
                         <PivotChart defaultSymbol={header.ticker||"RELIANCE"}/>
                       </div>
                     </div>
                   )}
+
+                  {/* Peers Tab */}
                   {activeTab==="peers"&&(
                     <div style={S.card}>
                       <div style={{fontSize:13,fontWeight:700,color:C.textSecond,marginBottom:4,textTransform:"uppercase",letterSpacing:".5px"}}>Sector Peers — {selected?.peers?.sector}</div>
@@ -586,7 +1005,20 @@ export default function App(){
                       </div>
                     </div>
                   )}
+
+                  {/* AI Analysis Tab */}
+                  {activeTab==="ai"&&(
+                    <AIAnalysisTab
+                      ai={aiData}
+                      loading={aiLoading}
+                      error={aiError}
+                      cmp={cmp}
+                      onRetry={()=>runAI(header.ticker,selected,priceRange)}
+                    />
+                  )}
                 </div>
+
+                {/* Right column — unchanged */}
                 <div style={{display:"flex",flexDirection:"column",gap:16}}>
                   <FairValuePanel cmp={cmp>0?cmp:500} eps={epsNum>0?epsNum:10} ticker={header.ticker||""}/>
                   <TrendingStocks onSelectStock={loadStock}/>

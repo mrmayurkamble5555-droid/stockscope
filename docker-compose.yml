@@ -1,0 +1,72 @@
+# ── StockScope Local Dev Stack ────────────────────────────────────────────────
+# Usage:
+#   docker compose up --build   → first time
+#   docker compose up           → subsequent starts
+#   docker compose down         → stop
+#   docker compose down -v      → stop + delete volumes
+#
+# Backend runs on port 3002 here to avoid conflict with npm run dev on 3001
+
+services:
+
+  backend:
+    build:
+      context: ./backend
+      target: builder
+    command: npm run dev
+    ports:
+      - "3002:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgresql://postgres:localdev@postgres:5432/stockscope
+      REDIS_URL: redis://redis:6379
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+    restart: unless-stopped
+    mem_limit: 512m
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB:       stockscope
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/src/db/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 256m
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 256m
+
+volumes:
+  pgdata:
+  redisdata:

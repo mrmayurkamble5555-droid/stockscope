@@ -33,7 +33,7 @@ async function fetchFundamentals(ticker) {
 
 // ── 3-Method Fair Value Engine ───────────────────────────────────────────────
 function computeFairValue(data) {
-  const { eps, bookValue, fcfPerShare, pe, industryPE, roe, growthRate, debtToEquity } = data;
+  const { eps, bookValue, fcfPerShare, industryPE, roe, growthRate, debtToEquity } = data;
 
   const results = {};
   let totalWeight = 0;
@@ -103,6 +103,8 @@ function AnalysisLoader({ ticker }) {
     const t1 = setInterval(() => setStep(s => Math.min(s+1, steps.length-1)), 600);
     const t2 = setInterval(() => setDots(d => d.length < 3 ? d + '.' : ''), 400);
     return () => { clearInterval(t1); clearInterval(t2); };
+  // steps is a constant defined in this render — intentionally run once only
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -216,7 +218,8 @@ export default function FairValuePanel({ ticker = '', cmp = 0 }) {
   // Verdict
   const getVerdict = () => {
     if (!fvData?.fairValue || !cmp) return null;
-    const { fairValue, strongBuy, buy, hold, avoid } = fvData;
+    const { strongBuy, buy, hold, avoid } = fvData;
+    const fairValue = fvData.fairValue;
     if (cmp <= strongBuy) return { label:'Strong Buy', color:C.green,  bg:C.greenLight,  text:C.greenText, emoji:'🟢' };
     if (cmp <= buy)       return { label:'Buy',         color:C.green,  bg:C.greenLight,  text:C.greenText, emoji:'✅' };
     if (cmp <= hold)      return { label:'Fair Value',  color:C.amber,  bg:C.amberLight,  text:C.amberText, emoji:'🟡' };

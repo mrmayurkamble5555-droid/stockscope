@@ -1,240 +1,148 @@
-import { Request, Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
-import { createClient as createRedisClient } from 'redis';
+// backend/src/controllers/trendingController.ts
+// FIXED: Removed @supabase/supabase-js and redis (node-redis) imports — not installed.
+// Uses existing db (pg Pool) and cache (ioredis) that are already in the project.
+// SECURITY: No internal error details exposed to client.
 
-const supabase = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
-);
+import { Request, Response } from "express";
+import { db }    from "../db/connection";
+import { cache } from "../services/cacheService";
 
-const redis = createRedisClient({ url: process.env.REDIS_URL! });
-redis.connect().catch(console.error);
+const CACHE_TTL = 3600; // 1 hour
 
-const CACHE_TTL = 3600; // 1 hour for trending
-
-// ─── GET /api/trending ───────────────────────────────────────────────────────
+// ── GET /api/v1/trending ──────────────────────────────────────────────────────
 export const getTrendingStocksHandler = async (
-    req: Request,
-    res: Response
+  req: Request,
+  res: Response
 ): Promise<void> => {
-    try {
-        const cacheKey = 'trending:today';
-        const cached = await redis.get(cacheKey);
-        if (cached) {
-            res.json(JSON.parse(cached));
-            return;
-        }
+  try {
+    const cacheKey = "trending:today";
+    const cached   = await cache.get<any>(cacheKey);
+    if (cached) { res.json(cached); return; }
 
-        const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toISOString().split("T")[0];
 
-        const { data, error } = await supabase
-            .from('trending_stocks')
-            .select(`
-                rank_position,
-                trending_score,
-                volume_surge_pct,
-                price_change_pct,
-                stocks (
-                    ticker,
-                    name,
-                    sector,
-                    exchange
-                ),
-                fundamentals (
-                    cmp,
-                    market_cap_cr
-                )
-            `)
-            .eq('date', today)
-            .order('rank_position', { ascending: true })
-            .limit(20);
+    // Try today first, fall back to most recent date
+    const result = await db.query(`
+      SELECT
+        ts.rank_position, ts.trending_score, ts.volume_surge_pct,
+        ts.price_change_pct, ts.date,
+        s.ticker, s.name, s.sector, s.exchange,
+        f.cmp, f.market_cap_cr
+      FROM trending_stocks ts
+      JOIN stocks s ON s.id = ts.stock_id
+      LEFT JOIN LATERAL (
+        SELECT cmp, market_cap_cr FROM fundamentals
+        WHERE stock_id = ts.stock_id ORDER BY date DESC LIMIT 1
+      ) f ON true
+      WHERE ts.date = (
+        SELECT MAX(date) FROM trending_stocks
+        WHERE date <= $1
+      )
+      ORDER BY ts.rank_position ASC
+      LIMIT 20
+    `, [today]);
 
-        if (error) throw error;
+    const rows      = result.rows;
+    const asOf      = rows[0]?.date ?? today;
+    const isFallback = asOf !== today;
 
-        // If no data for today yet, fall back to most recent date
-        if (!data || data.length === 0) {
-            const { data: fallback, error: fallbackError } = await supabase
-                .from('trending_stocks')
-                .select(`
-                    rank_position,
-                    trending_score,
-                    volume_surge_pct,
-                    price_change_pct,
-                    date,
-                    stocks (
-                        ticker,
-                        name,
-                        sector,
-                        exchange
-                    ),
-                    fundamentals (
-                        cmp,
-                        market_cap_cr
-                    )
-                `)
-                .order('date', { ascending: false })
-                .order('rank_position', { ascending: true })
-                .limit(20);
+    const payload = {
+      trending: rows.map(r => ({
+        ticker:         r.ticker,
+        name:           r.name,
+        sector:         r.sector,
+        exchange:       r.exchange,
+        cmp:            r.cmp            ? parseFloat(r.cmp)            : null,
+        marketCap:      r.market_cap_cr  ? parseFloat(r.market_cap_cr)  : null,
+        priceChangePct: parseFloat(r.price_change_pct  ?? 0),
+        volumeSurgePct: parseFloat(r.volume_surge_pct  ?? 0),
+        trendingScore:  parseFloat(r.trending_score     ?? 0),
+        rank:           r.rank_position,
+      })),
+      asOf,
+      isFallback,
+    };
 
-            if (fallbackError) throw fallbackError;
-
-            const payload = {
-                trending: formatTrendingRows(fallback ?? []),
-                asOf: fallback?.[0]?.date ?? today,
-                isFallback: true,
-            };
-
-            await redis.setEx(cacheKey, CACHE_TTL, JSON.stringify(payload));
-            res.json(payload);
-            return;
-        }
-
-        const payload = {
-            trending: formatTrendingRows(data),
-            asOf: today,
-            isFallback: false,
-        };
-
-        await redis.setEx(cacheKey, CACHE_TTL, JSON.stringify(payload));
-        res.json(payload);
-    } catch (err) {
-        console.error('[getTrendingStocksHandler]', err);
-        res.status(500).json({ error: 'Failed to fetch trending stocks' });
-    }
+    await cache.set(cacheKey, payload, CACHE_TTL);
+    res.json(payload);
+  } catch (err) {
+    console.error("[getTrendingStocksHandler]", err);
+    res.status(500).json({ error: "Failed to fetch trending stocks" });
+  }
 };
 
-// ─── POST /api/trending/refresh ──────────────────────────────────────────────
+// ── POST /api/v1/trending/refresh ─────────────────────────────────────────────
 export const refreshTrendingHandler = async (
-    req: Request,
-    res: Response
+  req: Request,
+  res: Response
 ): Promise<void> => {
-    try {
-        const today = new Date().toISOString().split('T')[0];
+  try {
+    const today       = new Date().toISOString().split("T")[0];
+    const twentyAgo   = new Date();
+    twentyAgo.setDate(twentyAgo.getDate() - 20);
+    const fromDate    = twentyAgo.toISOString().split("T")[0];
+    const yesterday   = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split("T")[0];
 
-        // Pull OHLC for today + 20-day avg volume from Supabase
-        const { data: ohlcToday, error: ohlcError } = await supabase
-            .from('ohlc')
-            .select('stock_id, close, volume')
-            .eq('date', today);
-
-        if (ohlcError) throw ohlcError;
-        if (!ohlcToday || ohlcToday.length === 0) {
-            res.status(400).json({
-                error: 'No OHLC data for today yet. Run after market close.',
-            });
-            return;
-        }
-
-        // Get 20-day average volume per stock
-        const twentyDaysAgo = new Date();
-        twentyDaysAgo.setDate(twentyDaysAgo.getDate() - 20);
-        const fromDate = twentyDaysAgo.toISOString().split('T')[0];
-
-        const { data: avgVolData, error: avgError } = await supabase
-            .from('ohlc')
-            .select('stock_id, volume')
-            .gte('date', fromDate)
-            .lt('date', today);
-
-        if (avgError) throw avgError;
-
-        // Build avg volume map
-        const volMap: Record<number, { total: number; count: number }> = {};
-        for (const row of avgVolData ?? []) {
-            if (!volMap[row.stock_id]) volMap[row.stock_id] = { total: 0, count: 0 };
-            volMap[row.stock_id].total += row.volume;
-            volMap[row.stock_id].count += 1;
-        }
-
-        // Get yesterday's close for price change calc
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-        const { data: ohlcYesterday } = await supabase
-            .from('ohlc')
-            .select('stock_id, close')
-            .eq('date', yesterdayStr);
-
-        const yesterdayCloseMap: Record<number, number> = {};
-        for (const row of ohlcYesterday ?? []) {
-            yesterdayCloseMap[row.stock_id] = row.close;
-        }
-
-        // Score each stock
-        const scored = ohlcToday
-            .map(row => {
-                const avgVol = volMap[row.stock_id]
-                    ? volMap[row.stock_id].total / volMap[row.stock_id].count
-                    : 0;
-                const volumeSurgePct =
-                    avgVol > 0
-                        ? ((row.volume - avgVol) / avgVol) * 100
-                        : 0;
-                const prevClose = yesterdayCloseMap[row.stock_id] ?? null;
-                const priceChangePct =
-                    prevClose && prevClose > 0
-                        ? ((row.close - prevClose) / prevClose) * 100
-                        : 0;
-
-                // 60% volume surge weight + 40% absolute price move
-                const trendingScore =
-                    Math.max(volumeSurgePct, 0) * 0.6 +
-                    Math.abs(priceChangePct) * 0.4;
-
-                return {
-                    stock_id: row.stock_id,
-                    trending_score: trendingScore,
-                    volume_surge_pct: volumeSurgePct,
-                    price_change_pct: priceChangePct,
-                };
-            })
-            .filter(s => s.trending_score > 0)
-            .sort((a, b) => b.trending_score - a.trending_score)
-            .slice(0, 50);
-
-        // Upsert trending_stocks table
-        const upsertRows = scored.map((s, i) => ({
-            stock_id: s.stock_id,
-            date: today,
-            trending_score: s.trending_score,
-            volume_surge_pct: s.volume_surge_pct,
-            price_change_pct: s.price_change_pct,
-            rank_position: i + 1,
-        }));
-
-        const { error: upsertError } = await supabase
-            .from('trending_stocks')
-            .upsert(upsertRows, { onConflict: 'stock_id,date' });
-
-        if (upsertError) throw upsertError;
-
-        // Bust Redis cache
-        await redis.del('trending:today');
-
-        res.json({
-            success: true,
-            computed: scored.length,
-            date: today,
-        });
-    } catch (err) {
-        console.error('[refreshTrendingHandler]', err);
-        res.status(500).json({ error: 'Failed to refresh trending' });
+    // Today's OHLC
+    const todayRes = await db.query(
+      "SELECT stock_id, close, volume FROM ohlc WHERE date = $1", [today]
+    );
+    if (todayRes.rows.length === 0) {
+      res.status(400).json({ error: "No OHLC data for today yet. Run after market close." });
+      return;
     }
-};
 
-// ─── Helper ──────────────────────────────────────────────────────────────────
-function formatTrendingRows(rows: any[]) {
-    return rows.map(row => ({
-        ticker: row.stocks?.ticker,
-        name: row.stocks?.name,
-        sector: row.stocks?.sector,
-        exchange: row.stocks?.exchange,
-        cmp: row.fundamentals?.cmp,
-        marketCap: row.fundamentals?.market_cap_cr,
-        priceChangePct: Number(row.price_change_pct ?? 0),
-        volumeSurgePct: Number(row.volume_surge_pct ?? 0),
-        trendingScore: Number(row.trending_score ?? 0),
-        rank: row.rank_position,
-    }));
-}
+    // 20-day average volume
+    const avgRes = await db.query(
+      "SELECT stock_id, AVG(volume)::float AS avg_vol FROM ohlc WHERE date >= $1 AND date < $2 GROUP BY stock_id",
+      [fromDate, today]
+    );
+    const avgVolMap: Record<number, number> = {};
+    for (const r of avgRes.rows) avgVolMap[r.stock_id] = r.avg_vol;
+
+    // Yesterday's close
+    const prevRes = await db.query(
+      "SELECT stock_id, close FROM ohlc WHERE date = $1", [yesterdayStr]
+    );
+    const prevCloseMap: Record<number, number> = {};
+    for (const r of prevRes.rows) prevCloseMap[r.stock_id] = parseFloat(r.close);
+
+    // Score and rank
+    const scored = todayRes.rows
+      .map((r: any) => {
+        const avgVol          = avgVolMap[r.stock_id] ?? 0;
+        const volumeSurgePct  = avgVol > 0 ? ((r.volume - avgVol) / avgVol) * 100 : 0;
+        const prevClose       = prevCloseMap[r.stock_id] ?? null;
+        const priceChangePct  = prevClose && prevClose > 0
+          ? ((parseFloat(r.close) - prevClose) / prevClose) * 100 : 0;
+        const trendingScore   = Math.max(volumeSurgePct, 0) * 0.6 + Math.abs(priceChangePct) * 0.4;
+        return { stock_id: r.stock_id, trendingScore, volumeSurgePct, priceChangePct };
+      })
+      .filter((s: any) => s.trendingScore > 0)
+      .sort((a: any, b: any) => b.trendingScore - a.trendingScore)
+      .slice(0, 50);
+
+    // Upsert
+    for (let i = 0; i < scored.length; i++) {
+      const s = scored[i];
+      await db.query(`
+        INSERT INTO trending_stocks
+          (stock_id, date, trending_score, volume_surge_pct, price_change_pct, rank_position)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        ON CONFLICT (stock_id, date) DO UPDATE SET
+          trending_score   = EXCLUDED.trending_score,
+          volume_surge_pct = EXCLUDED.volume_surge_pct,
+          price_change_pct = EXCLUDED.price_change_pct,
+          rank_position    = EXCLUDED.rank_position
+      `, [s.stock_id, today, s.trendingScore, s.volumeSurgePct, s.priceChangePct, i + 1]);
+    }
+
+    await cache.del("trending:today");
+    res.json({ success: true, computed: scored.length, date: today });
+  } catch (err) {
+    console.error("[refreshTrendingHandler]", err);
+    res.status(500).json({ error: "Failed to refresh trending" });
+  }
+};

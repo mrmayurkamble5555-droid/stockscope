@@ -19,9 +19,14 @@ export async function runFundamentalsIngestion() {
       const nse = await fetchNseQuote(stock.ticker);
 
       // Fetch from Screener (ratios + growth)
+      // screenerService must return the 3 new fields:
+      //   scr.priceToBook    → CMP / Book Value
+      //   scr.currentRatio   → Current Assets / Current Liabilities
+      //   scr.return5YrPct   → Stock return over 5 years %
       const scr = await fetchScreenerRatios(stock.ticker);
 
       await upsertFundamentals(stock.id, today, {
+        // ── Original 7 ranking metrics ────────────────────────────────────────
         peRatio:        nse.peRatio       ?? scr.pe             ?? null,
         industryPe:     nse.industryPe                          ?? null,
         roce:           scr.roce                                ?? null,
@@ -30,6 +35,13 @@ export async function runFundamentalsIngestion() {
         freeCashFlow:   scr.freeCashFlow                        ?? null,
         profitGrowth5Y: scr.profitGrowth5Y                      ?? null,
         pledgedPct:     nse.pledgedPct    ?? scr.pledgedPct     ?? null,
+
+        // ── 3 new ranking metrics (migration 006) ─────────────────────────────
+        priceToBook:    scr.priceToBook   ?? nse.priceToBook    ?? null,
+        currentRatio:   scr.currentRatio                        ?? null,
+        return5YrPct:   scr.return5YrPct                        ?? null,
+
+        // ── Display-only fields (not used in ranking score) ───────────────────
         marketCap:      nse.marketCap                           ?? null,
         cmp:            nse.cmp                                 ?? null,
         source:         'MIXED',

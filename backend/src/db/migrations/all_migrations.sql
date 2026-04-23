@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════
 -- StockScope Database Migrations
--- Run in order: 001 → 005
+-- Run in order: 001 → 006
 -- ═══════════════════════════════════════════════════════════════
 
 -- ─── 001: stocks ─────────────────────────────────────────────────────────────
@@ -80,3 +80,43 @@ CREATE TABLE IF NOT EXISTS peer_ranks (
   UNIQUE(stock_id, date)
 );
 CREATE INDEX IF NOT EXISTS idx_rank_stock_date ON peer_ranks(stock_id, date DESC);
+
+-- ─── 006: fundamentals — add 3 new ranking columns ───────────────────────────
+-- Run this migration if your fundamentals table was already created by 002.
+-- Safe to run multiple times (IF NOT EXISTS equivalent via DO block).
+--
+-- New columns added for the 10-metric ranking system:
+--   price_to_book   → CMP / Book Value  (lower = better)
+--   current_ratio   → Current Assets / Current Liabilities  (higher = better)
+--   return_5yr_pct  → Stock return over 5 years %  (higher = better)
+
+DO $$
+BEGIN
+  -- price_to_book
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'fundamentals' AND column_name = 'price_to_book'
+  ) THEN
+    ALTER TABLE fundamentals ADD COLUMN price_to_book NUMERIC(10,4);
+    RAISE NOTICE 'Added column: price_to_book';
+  END IF;
+
+  -- current_ratio
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'fundamentals' AND column_name = 'current_ratio'
+  ) THEN
+    ALTER TABLE fundamentals ADD COLUMN current_ratio NUMERIC(10,4);
+    RAISE NOTICE 'Added column: current_ratio';
+  END IF;
+
+  -- return_5yr_pct
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'fundamentals' AND column_name = 'return_5yr_pct'
+  ) THEN
+    ALTER TABLE fundamentals ADD COLUMN return_5yr_pct NUMERIC(10,2);
+    RAISE NOTICE 'Added column: return_5yr_pct';
+  END IF;
+END
+$$;
